@@ -135,7 +135,7 @@ async function getDirectUrl(hash, videoId) {
   }
 }
 
-// Pipe proxy - streamuje video přímo do Stremio
+// Redirect na přímý storage URL
 app.get("/pipe/:hash/:videoId", async (req, res) => {
   const { hash, videoId } = req.params;
   console.log(`Pipe request: ${hash}/${videoId}`);
@@ -146,28 +146,8 @@ app.get("/pipe/:hash/:videoId", async (req, res) => {
       return res.status(404).send("Video not found");
     }
 
-    console.log(`Piping: ${directUrl.substring(0, 80)}...`);
-
-    const range = req.headers.range;
-    const headers = {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      "Referer": "https://www.hellspy.to/",
-    };
-    if (range) headers["Range"] = range;
-
-    const videoRes = await fetch(directUrl, { headers });
-
-    res.status(videoRes.status);
-    res.setHeader("Content-Type", videoRes.headers.get("content-type") || "video/mp4");
-    if (videoRes.headers.get("content-length")) {
-      res.setHeader("Content-Length", videoRes.headers.get("content-length"));
-    }
-    if (videoRes.headers.get("content-range")) {
-      res.setHeader("Content-Range", videoRes.headers.get("content-range"));
-    }
-    res.setHeader("Accept-Ranges", "bytes");
-
-    videoRes.body.pipe(res);
+    console.log(`Redirecting to: ${directUrl.substring(0, 80)}...`);
+    res.redirect(302, directUrl);
   } catch (e) {
     console.error("Pipe error:", e.message);
     res.status(500).send("Error");
