@@ -146,8 +146,9 @@ app.get("/pipe/:hash/:videoId", async (req, res) => {
       return res.status(404).send("Video not found");
     }
 
-    console.log(`Redirecting to: ${directUrl.substring(0, 80)}...`);
-    res.redirect(302, directUrl);
+    const cleanUrl = directUrl.replace(/\\u0026/g, '&').replace(/\\\/\//g, '/').replace(/\\$/,'').replace(/\\"/g,'').trim();
+    console.log('Redirecting to: ' + cleanUrl.substring(0, 80));
+    res.redirect(302, cleanUrl);
   } catch (e) {
     console.error("Pipe error:", e.message);
     res.status(500).send("Error");
