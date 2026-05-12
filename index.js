@@ -5,116 +5,11 @@ const cheerio = require("cheerio");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const BASE = "https://www.hellspy.to";
+const TMDB_API_KEY = process.env.TMDB_API_KEY || "";
 
-const searchCache = new Map();
-const SEARCH_CACHE_TTL = 30 * 60 * 1000; // 30 minut pro vyhledávání
-
-function getCache(key) {
-  const c = searchCache.get(key);
-  if (c && Date.now() - c.ts < SEARCH_CACHE_TTL) return c.data;
-  return null;
-}
-function setCache(key, data) {
-  searchCache.set(key, { data, ts: Date.now() });
-}
-
-const HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-  "Accept-Language": "cs-CZ,cs;q=0.9,en;q=0.8",
-  "Referer": "https://www.hellspy.to/",
-};
-
-async function getMovieTitle(imdbId) {
-  const tmdbKey = process.env.TMDB_API_KEY;
-  if (!tmdbKey) return null;
-  try {
-    const res = await fetch(
-      `https://api.themoviedb.org/3/find/${imdbId}?api_key=${tmdbKey}&external_source=imdb_id`
-    );
-    const data = await res.json();
-    const item = data.movie_results?.[0] || data.tv_results?.[0];
-    return item ? (item.title || item.name) : null;
-  } catch (e) {
-    return null;
-  }
-}
-
-async function searchHellspy(query) {
-  const cacheKey = `search:${query}`;
-  const cached = getCache(cacheKey);
-  if (cached) return cached;
-
-  try {
-    const url = `${BASE}/?query=${encodeURIComponent(query)}`;
-    const res = await fetch(url, { headers: HEADERS });
-    const html = await res.text();
-    const $ = cheerio.load(html);
-
-    const results = [];
-    $("a").each((i, el) => {
-      const href = $(el).attr("href") || "";
-      const title = $(el).text().trim();
-      if (href.includes("/video/") && title && title.length > 2) {
-        const match = href.match(/\/video\/([^/]+)\/(\d+)/);
-        if (match) {
-          results.push({
-            title: title,
-            url: `${BASE}${href}`,
-            hash: match[1],
-            videoId: match[2],
-          });
-        }
-      }
-    });
-
-    const unique = results.filter((v, i, a) => a.findIndex(t => t.url === v.url) === i);
-    setCache(cacheKey, unique);
-    return unique;
-  } catch (e) {
-    console.error("Search error:", e.message);
-    return [];
-  }
-}
-
-// Vždy načte ČERSTVÝ stream URL (bez cache - token vyprší)
-async function getFreshStreamUrl(hash, videoId) {
-  try {
-    const url = `${BASE}/video/${hash}/${videoId}`;
-    const res = await fetch(url, { headers: HEADERS });
-    const html = await res.text();
-    const $ = cheerio.load(html);
-
-    let streamUrl = null;
-
-    $("source").each((i, el) => {
-      const src = $(el).attr("src");
-      if (src && src.includes(".mp4")) streamUrl = src;
-    });
-
-    if (!streamUrl) {
-      $("script").each((i, el) => {
-        const content = $(el).html() || "";
-        const mp4Match = content.match(/["'](https?:\/\/[^"']*\.mp4[^"']*)['"]/);
-        if (mp4Match && !streamUrl) streamUrl = mp4Match[1];
-      });
-    }
-
-    if (!streamUrl) {
-      const videoSrc = $("video").attr("src");
-      if (videoSrc) streamUrl = videoSrc;
-    }
-
-    return streamUrl;
-  } catch (e) {
-    return null;
-  }
-}
-
-const MANIFEST = {
+const manifest = {
   id: "cz.hellspy.addon",
-  version: "4.0.0",
+  version: "5.0.0",
   name: "🔥 Hellspy CZ",
   description: "Filmy a seriály z Hellspy.to — CZ dabing, CZ titulky",
   resources: ["stream"],
@@ -125,115 +20,200 @@ const MANIFEST = {
 };
 
 app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "*");
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Headers", "*");
   next();
 });
 
-app.get("/manifest.json", (req, res) => res.json(MANIFEST));
+app.get("/manifest.json", (req, res) => {
+  res.json(manifest);
+});
 
-// DYNAMICKÁ PROXY - načte čerstvý token při každém kliknutí
-app.get("/play/:hash/:videoId", async (req, res) => {
-  const { hash, videoId } = req.params;
-  console.log(`Proxy request pro videoId: ${videoId}`);
-
+// Získá název filmu z TMDB podle IMDB ID
+async function getMovieTitle(imdbId) {
+  if (!TMDB_API_KEY) return null;
   try {
-    // Načti čerstvý stream URL
-    const streamUrl = await getFreshStreamUrl(hash, videoId);
+    const url = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const item = (data.movie_results && data.movie_results[0]) || (data.tv_results && data.tv_results[0]);
+    return item ? item.title || item.name : null;
+  } catch (e) {
+    return null;
+  }
+}
 
-    if (!streamUrl) {
-      return res.status(404).send("Stream nenalezen");
+// Vyhledá na Hellspy a vrátí seznam videí
+async function searchHellspy(query) {
+  try {
+    const url = `https://www.hellspy.to/?query=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "cs-CZ,cs;q=0.9",
+        "Accept": "text/html,application/xhtml+xml",
+        "Referer": "https://www.hellspy.to/",
+      },
+    });
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const results = [];
+
+    $("a.file-title, .search-result a, a[href*='/video/']").each((i, el) => {
+      const href = $(el).attr("href");
+      const title = $(el).text().trim();
+      if (href && href.includes("/video/") && title) {
+        const match = href.match(/\/video\/([a-f0-9]+)\/(\d+)/);
+        if (match) {
+          results.push({ title, hash: match[1], id: match[2] });
+        }
+      }
+    });
+
+    return results;
+  } catch (e) {
+    console.error("Hellspy search error:", e.message);
+    return [];
+  }
+}
+
+// Získá přímý MP4 URL z Hellspy video stránky
+async function getDirectUrl(hash, videoId) {
+  try {
+    const url = `https://www.hellspy.to/video/${hash}/${videoId}`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "cs-CZ,cs;q=0.9",
+        "Referer": "https://www.hellspy.to/",
+      },
+    });
+    const html = await res.text();
+    const $ = cheerio.load(html);
+
+    // Hledej přímý MP4 link
+    let directUrl = null;
+
+    // Metoda 1: source tag
+    $("source[type='video/mp4'], source[src*='.mp4']").each((i, el) => {
+      if (!directUrl) directUrl = $(el).attr("src");
+    });
+
+    // Metoda 2: video tag
+    $("video[src*='.mp4']").each((i, el) => {
+      if (!directUrl) directUrl = $(el).attr("src");
+    });
+
+    // Metoda 3: hledej v JS kódu
+    if (!directUrl) {
+      const scripts = $("script").map((i, el) => $(el).html()).get().join("\n");
+      const mp4Match = scripts.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/);
+      if (mp4Match) directUrl = mp4Match[0];
     }
 
-    console.log(`Čerstvý stream URL získán, přesměrovávám...`);
+    // Metoda 4: hledej file URL v JSON datech
+    if (!directUrl) {
+      const jsonMatch = html.match(/"file"\s*:\s*"(https?:[^"]+\.mp4[^"]*)"/);
+      if (jsonMatch) directUrl = jsonMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
+    }
 
-    // Přesměruj na čerstvý stream
-    const range = req.headers.range;
-    const fetchHeaders = {
-      ...HEADERS,
-      "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
-    };
-    if (range) fetchHeaders["Range"] = range;
+    // Metoda 5: storage URL
+    if (!directUrl) {
+      const storageMatch = html.match(/(https?:\/\/storage\d+\.[^"'\s]+\.mp4[^"'\s]*)/);
+      if (storageMatch) directUrl = storageMatch[1];
+    }
 
-    const upstream = await fetch(streamUrl, { headers: fetchHeaders });
-
-    res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
-    res.setHeader("Accept-Ranges", "bytes");
-    res.setHeader("Cache-Control", "no-cache");
-
-    const contentLength = upstream.headers.get("content-length");
-    if (contentLength) res.setHeader("Content-Length", contentLength);
-
-    const contentRange = upstream.headers.get("content-range");
-    if (contentRange) res.setHeader("Content-Range", contentRange);
-
-    if (upstream.status === 206) res.status(206);
-    else res.status(200);
-
-    upstream.body.pipe(res);
+    return directUrl;
   } catch (e) {
-    console.error("Play proxy chyba:", e.message);
-    res.status(500).send("Chyba přehrávání");
+    console.error("getDirectUrl error:", e.message);
+    return null;
+  }
+}
+
+// Pipe proxy - streamuje video přímo do Stremio
+app.get("/pipe/:hash/:videoId", async (req, res) => {
+  const { hash, videoId } = req.params;
+  console.log(`Pipe request: ${hash}/${videoId}`);
+
+  try {
+    const directUrl = await getDirectUrl(hash, videoId);
+    if (!directUrl) {
+      return res.status(404).send("Video not found");
+    }
+
+    console.log(`Piping: ${directUrl.substring(0, 80)}...`);
+
+    const range = req.headers.range;
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      "Referer": "https://www.hellspy.to/",
+    };
+    if (range) headers["Range"] = range;
+
+    const videoRes = await fetch(directUrl, { headers });
+
+    res.status(videoRes.status);
+    res.setHeader("Content-Type", videoRes.headers.get("content-type") || "video/mp4");
+    if (videoRes.headers.get("content-length")) {
+      res.setHeader("Content-Length", videoRes.headers.get("content-length"));
+    }
+    if (videoRes.headers.get("content-range")) {
+      res.setHeader("Content-Range", videoRes.headers.get("content-range"));
+    }
+    res.setHeader("Accept-Ranges", "bytes");
+
+    videoRes.body.pipe(res);
+  } catch (e) {
+    console.error("Pipe error:", e.message);
+    res.status(500).send("Error");
   }
 });
 
 app.get("/stream/:type/:id.json", async (req, res) => {
   const { type, id } = req.params;
-  const host = `https://${req.get("host")}`;
   console.log(`Stream request: ${type} / ${id}`);
 
   try {
     let searchQuery = id;
 
+    // Přeloď IMDB ID na název
     if (id.startsWith("tt")) {
-      const title = await getMovieTitle(id);
+      const baseId = id.split(":")[0];
+      const title = await getMovieTitle(baseId);
       if (title) {
         searchQuery = title;
-        console.log(`Název z TMDB: ${searchQuery}`);
+        console.log(`Název z TMDB: ${title}`);
+      } else {
+        return res.json({ streams: [] });
       }
     }
 
     const results = await searchHellspy(searchQuery);
     console.log(`Hellspy výsledky pro "${searchQuery}": ${results.length}`);
 
-    if (results.length === 0) return res.json({ streams: [] });
+    const streams = results.slice(0, 8).map((r) => {
+      const isCZ = /\bCZ\b|czech|česky|dabing|dabingem/i.test(r.title);
+      const isSK = /\bSK\b|slovak|slovensky/i.test(r.title);
+      const flag = isCZ ? "🇨🇿" : isSK ? "🇸🇰" : "🎬";
+      const label = isCZ ? "Hellspy CZ" : isSK ? "Hellspy SK" : "Hellspy";
 
-    const streams = [];
-
-    for (const result of results.slice(0, 8)) {
-      const titleLower = result.title.toLowerCase();
-      let name = "🎬 Hellspy";
-
-      if (titleLower.includes("cz dab") || titleLower.includes("cz.dab") || titleLower.includes("dabing")) {
-        name = "🇨🇿🔊 Hellspy CZ DAB";
-      } else if (titleLower.includes("sk dab")) {
-        name = "🇸🇰🔊 Hellspy SK DAB";
-      } else if (titleLower.includes("cz tit") || titleLower.includes("titulky")) {
-        name = "🇨🇿💬 Hellspy CZ TIT";
-      } else if (titleLower.includes("cz") || titleLower.includes("czech")) {
-        name = "🇨🇿 Hellspy CZ";
-      }
-
-      // Dynamická proxy URL - token se načte až při kliknutí
-      const playUrl = `${host}/play/${result.hash}/${result.videoId}`;
-
-      streams.push({
-        name,
-        title: result.title,
-        url: playUrl,
+      return {
+        name: `${flag} ${label}`,
+        title: r.title,
+        url: `https://123451-8978.rostiapp.cz/pipe/${r.hash}/${r.id}`,
         behaviorHints: { notWebReady: false },
-      });
-    }
+      };
+    });
 
     console.log(`Vracím ${streams.length} streamů`);
     res.json({ streams });
   } catch (e) {
-    console.error("Error:", e.message);
+    console.error("Stream error:", e.message);
     res.json({ streams: [] });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Hellspy addon v4 běží na http://localhost:${PORT}`);
+  console.log(`✅ Hellspy addon v5 běží na http://localhost:${PORT}`);
   console.log(`📺 Přidej do Stremio: http://localhost:${PORT}/manifest.json`);
 });
