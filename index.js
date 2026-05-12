@@ -117,10 +117,15 @@ async function getDirectUrl(hash, videoId) {
       if (jsonMatch) directUrl = jsonMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
     }
 
-    // Metoda 5: storage URL
+    // Metoda 5: storage URL (s nebo bez https://)
     if (!directUrl) {
-      const storageMatch = html.match(/(https?:\/\/storage\d+\.[^"'\s]+\.mp4[^"'\s]*)/);
-      if (storageMatch) directUrl = storageMatch[1];
+      const storageMatch = html.match(/((?:https?:\/\/)?storage\d+\.[^"'\s\\]+\.mp4[^"'\s\\]*)/);
+      if (storageMatch) {
+        directUrl = storageMatch[1];
+        if (!directUrl.startsWith("http")) directUrl = "https://" + directUrl;
+        // Dekóduj unicode escape sekvence
+        directUrl = directUrl.replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\$/, "");
+      }
     }
 
     return directUrl;
