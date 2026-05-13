@@ -9,7 +9,7 @@ const TMDB_API_KEY = process.env.TMDB_API_KEY || "";
 
 const manifest = {
   id: "cz.hellspy.addon",
-  version: "5.0.0",
+  version: "5.1.0",
   name: "🔥 Hellspy CZ",
   description: "Filmy a seriály z Hellspy.to — CZ dabing, CZ titulky",
   resources: ["stream"],
@@ -29,7 +29,7 @@ app.get("/manifest.json", (req, res) => {
   res.json(manifest);
 });
 
-// Získá název filmu z TMDB podle IMDB ID
+// Získá název z TMDB podle IMDB ID (tt...)
 async function getMovieTitle(imdbId) {
   if (!TMDB_API_KEY) return null;
   try {
@@ -39,6 +39,27 @@ async function getMovieTitle(imdbId) {
     const item = (data.movie_results && data.movie_results[0]) || (data.tv_results && data.tv_results[0]);
     return item ? item.title || item.name : null;
   } catch (e) {
+    return null;
+  }
+}
+
+// Získá název z TMDB podle TMDB ID a typu
+async function getTitleFromTmdbId(tmdbId, type) {
+  if (!TMDB_API_KEY) return null;
+  try {
+    const endpoint = type === "series" ? "tv" : "movie";
+    const url = `https://api.themoviedb.org/3/${endpoint}/${tmdbId}?api_key=${TMDB_API_KEY}&language=cs-CZ`;
+    const res = await fetch(url);
+    const data = await res.json();
+    const title = data.title || data.name;
+    if (title) return title;
+    // Zkus anglicky jako zálohu
+    const url2 = `https://api.themoviedb.org/3/${endpoint}/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US`;
+    const res2 = await fetch(url2);
+    const data2 = await res2.json();
+    return data2.title || data2.name || null;
+  } catch (e) {
+    console.error("getTitleFromTmdbId error:", e.message);
     return null;
   }
 }
@@ -91,39 +112,32 @@ async function getDirectUrl(hash, videoId) {
     const html = await res.text();
     const $ = cheerio.load(html);
 
-    // Hledej přímý MP4 link
     let directUrl = null;
 
-    // Metoda 1: source tag
     $("source[type='video/mp4'], source[src*='.mp4']").each((i, el) => {
       if (!directUrl) directUrl = $(el).attr("src");
     });
 
-    // Metoda 2: video tag
     $("video[src*='.mp4']").each((i, el) => {
       if (!directUrl) directUrl = $(el).attr("src");
     });
 
-    // Metoda 3: hledej v JS kódu
     if (!directUrl) {
       const scripts = $("script").map((i, el) => $(el).html()).get().join("\n");
       const mp4Match = scripts.match(/https?:\/\/[^"'\s]+\.mp4[^"'\s]*/);
       if (mp4Match) directUrl = mp4Match[0];
     }
 
-    // Metoda 4: hledej file URL v JSON datech
     if (!directUrl) {
       const jsonMatch = html.match(/"file"\s*:\s*"(https?:[^"]+\.mp4[^"]*)"/);
       if (jsonMatch) directUrl = jsonMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/");
     }
 
-    // Metoda 5: storage URL (s nebo bez https://)
     if (!directUrl) {
       const storageMatch = html.match(/((?:https?:\/\/)?storage\d+\.[^"'\s\\]+\.mp4[^"'\s\\]*)/);
       if (storageMatch) {
         directUrl = storageMatch[1];
         if (!directUrl.startsWith("http")) directUrl = "https://" + directUrl;
-        // Dekóduj unicode escape sekvence
         directUrl = directUrl.replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\$/, "");
       }
     }
@@ -145,7 +159,6 @@ app.get("/pipe/:hash/:videoId", async (req, res) => {
     if (!directUrl) {
       return res.status(404).send("Video not found");
     }
-
     const cleanUrl = directUrl.replace(/\\u0026/g, '&').replace(/\\\/\//g, '/').replace(/\\$/,'').replace(/\\"/g,'').trim();
     console.log('Redirecting to: ' + cleanUrl.substring(0, 80));
     res.redirect(302, cleanUrl);
@@ -160,18 +173,33 @@ app.get("/stream/:type/:id.json", async (req, res) => {
   console.log(`Stream request: ${type} / ${id}`);
 
   try {
-    let searchQuery = id;
+    let searchQuery = null;
 
-    // Přeloď IMDB ID na název
-    if (id.startsWith("tt")) {
+    if (id.startsWith("tmdb:")) {
+      // TMDB ID — přelož na název přes TMDB API
+      const tmdbId = id.replace("tmdb:", "");
+      const title = await getTitleFromTmdbId(tmdbId, type);
+      if (title) {
+        searchQuery = title;
+        console.log(`Název z TMDB ID ${tmdbId}: ${title}`);
+      } else {
+        console.log(`TMDB ID ${tmdbId}: název nenalezen`);
+        return res.json({ streams: [] });
+      }
+    } else if (id.startsWith("tt")) {
+      // IMDB ID — přelož na název přes TMDB
       const baseId = id.split(":")[0];
       const title = await getMovieTitle(baseId);
       if (title) {
         searchQuery = title;
-        console.log(`Název z TMDB: ${title}`);
+        console.log(`Název z IMDB ${baseId}: ${title}`);
       } else {
+        console.log(`IMDB ID ${baseId}: název nenalezen`);
         return res.json({ streams: [] });
       }
+    } else {
+      // Přímý název
+      searchQuery = id;
     }
 
     const results = await searchHellspy(searchQuery);
@@ -200,6 +228,5 @@ app.get("/stream/:type/:id.json", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Hellspy addon v5 běží na http://localhost:${PORT}`);
-  console.log(`📺 Přidej do Stremio: http://localhost:${PORT}/manifest.json`);
+  console.log(`✅ Hellspy addon v5.1 běží na http://localhost:${PORT}`);
 });
